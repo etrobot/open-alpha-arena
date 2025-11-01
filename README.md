@@ -9,10 +9,10 @@ This is a project inspired by [nof1 Alpha Arena](https://nof1.ai), you can setup
 DONE:
 - Paper Trading
 - OpenAI compatible API
+- LEVERAGE
 - cctx quotes
 
 TODO:
-- LEVERAGE
 - real trading
 
 ## Star History
