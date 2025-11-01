@@ -4,7 +4,7 @@
   "scripts": {
     "dev": "concurrently \"pnpm run dev:backend\" \"pnpm run dev:frontend\"",
     "dev:frontend": "cd frontend && pnpm dev",
-    "dev:backend": "cd backend && uv sync --quiet && uv run uvicorn main:app --reload --port 5611 --host 0.0.0.0",
+    "dev:backend": "cd backend && uv sync --quiet && uv run python -m uvicorn main:app --reload --port 5611 --host 0.0.0.0",
     "build": "pnpm run build:frontend && pnpm run build:backend",
     "build:frontend": "cd frontend && pnpm build",
     "build:backend": "cd backend && echo \"Backend build step not yet implemented\"",

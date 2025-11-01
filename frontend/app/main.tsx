@@ -36,15 +36,21 @@ interface Account {
 
 interface Overview {
   account: Account
-  total_assets: number
-  positions_value: number
+  // Required by child components
+  return_rate: number
+  total_notional_value: number
+  positions_notional_value: number
+  // Optional extras for compatibility with snapshots
+  total_assets?: number
+  positions_value?: number
+  positions_market_value?: number
   portfolio?: {
     total_assets: number
     positions_value: number
   }
 }
-interface Position { id: number; account_id: number; symbol: string; name: string; market: string; quantity: number; available_quantity: number; avg_cost: number; last_price?: number | null; market_value?: number | null }
-interface Order { id: number; order_no: string; symbol: string; name: string; market: string; side: string; order_type: string; price?: number; quantity: number; filled_quantity: number; status: string }
+interface Position { id: number; account_id: number; symbol: string; name: string; market: string; quantity: number; available_quantity: number; avg_cost: number; leverage: number; last_price?: number | null; market_value?: number | null; notional_value?: number | null }
+interface Order { id: number; order_no: string; symbol: string; name: string; market: string; side: string; order_type: string; price?: number; quantity: number; leverage: number; filled_quantity: number; status: string }
 interface Trade { id: number; order_id: number; account_id: number; symbol: string; name: string; market: string; side: string; price: number; quantity: number; commission: number; trade_time: string }
 
 const PAGE_TITLES: Record<string, string> = {
@@ -98,13 +104,16 @@ function App() {
               refreshAccounts()
               // request initial snapshot
               ws!.send(JSON.stringify({ type: 'get_snapshot' }))
-            } else if (msg.type === 'snapshot') {
+            } else if (msg.type === 'snapshot' || msg.type === 'snapshot_full' || msg.type === 'snapshot_fast') {
               setOverview(msg.overview)
               setPositions(msg.positions)
               setOrders(msg.orders)
               setTrades(msg.trades || [])
               setAiDecisions(msg.ai_decisions || [])
-              setAllAssetCurves(msg.all_asset_curves || [])
+              // Only update asset curves if provided (snapshot_full includes them)
+              if (msg.all_asset_curves) {
+                setAllAssetCurves(msg.all_asset_curves)
+              }
             } else if (msg.type === 'trades') {
               setTrades(msg.trades || [])
             } else if (msg.type === 'order_filled') {

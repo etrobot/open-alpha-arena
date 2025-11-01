@@ -83,6 +83,7 @@ export interface AIDecision {
   total_balance: number
   executed: string
   order_id?: number
+  leverage?: number
 }
 
 export interface AIDecisionFilters {

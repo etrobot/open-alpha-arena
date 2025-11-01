@@ -8,7 +8,7 @@ from repositories.user_repo import get_or_create_user, get_user
 from repositories.account_repo import get_or_create_default_account, get_account
 from repositories.order_repo import list_orders
 from repositories.position_repo import list_positions
-from services.asset_calculator import calc_positions_value
+from services.asset_calculator import calc_positions_value, calc_positions_market_value
 from services.market_data import get_last_price
 from services.scheduler import add_account_snapshot_job, remove_account_snapshot_job
 from database.models import Trade, User, Account, CryptoPrice, AIDecisionLog
@@ -119,8 +119,14 @@ async def _send_snapshot_optimized(db: Session, account_id: int):
         db.query(AIDecisionLog).filter(AIDecisionLog.account_id == account_id).order_by(AIDecisionLog.decision_time.desc()).limit(10).all()  # Reduced from 20 to 10
     )
     
-    # Use cached positions value calculation
-    positions_value = calc_positions_value(db, account_id)
+    # Calculate positions MARKET VALUE (equity) and NOTIONAL VALUE (exposure)
+    positions_market_value = calc_positions_market_value(db, account_id)
+    positions_notional_value = calc_positions_value(db, account_id)
+
+    # Total assets = cash + market value (NOT notional!)
+    total_assets = positions_market_value + float(account.current_cash)
+    initial_capital = float(account.initial_capital)
+    return_rate = (total_assets / initial_capital) - 1 if initial_capital > 0 else 0.0
 
     overview = {
         "account": {
@@ -132,8 +138,11 @@ async def _send_snapshot_optimized(db: Session, account_id: int):
             "current_cash": float(account.current_cash),
             "frozen_cash": float(account.frozen_cash),
         },
-        "total_assets": positions_value + float(account.current_cash),
-        "positions_value": positions_value,
+        "return_rate": return_rate,
+        "total_assets": total_assets,  # CHANGED: Equity-based total
+        "positions_market_value": positions_market_value,  # CHANGED: Market value
+        "total_notional_value": total_assets,  # DEPRECATED: Keep for compatibility but use total_assets
+        "positions_notional_value": positions_notional_value,  # DEPRECATED: Still available for risk exposure
     }
     
     # Optimize position enrichment - batch price fetching
@@ -166,8 +175,10 @@ async def _send_snapshot_optimized(db: Session, account_id: int):
             "quantity": float(p.quantity),
             "available_quantity": float(p.available_quantity),
             "avg_cost": float(p.avg_cost),
+            "leverage": p.leverage,
             "last_price": float(price) if price is not None else None,
             "market_value": (float(price) * float(p.quantity)) if price is not None else None,
+            "notional_value": (float(price) * float(p.quantity) * p.leverage) if price is not None else None,
         })
 
     # Prepare response data - exclude expensive asset curve calculation for frequent updates
@@ -187,6 +198,7 @@ async def _send_snapshot_optimized(db: Session, account_id: int):
                 "order_type": o.order_type,
                 "price": float(o.price) if o.price is not None else None,
                 "quantity": float(o.quantity),
+                "leverage": o.leverage,
                 "filled_quantity": float(o.filled_quantity),
                 "status": o.status,
             }
@@ -220,6 +232,7 @@ async def _send_snapshot_optimized(db: Session, account_id: int):
                 "total_balance": float(d.total_balance),
                 "executed": str(d.executed).lower() if d.executed else "false",
                 "order_id": d.order_id,
+                "leverage": getattr(d, "leverage", 1),
             }
             for d in ai_decisions
         ],
@@ -257,7 +270,15 @@ async def _send_snapshot(db: Session, account_id: int):
     ai_decisions = (
         db.query(AIDecisionLog).filter(AIDecisionLog.account_id == account_id).order_by(AIDecisionLog.decision_time.desc()).limit(20).all()
     )
-    positions_value = calc_positions_value(db, account_id)
+    
+    # Calculate positions MARKET VALUE (equity) and NOTIONAL VALUE (exposure)
+    positions_market_value = calc_positions_market_value(db, account_id)
+    positions_notional_value = calc_positions_value(db, account_id)
+
+    # Total assets = cash + market value (NOT notional!)
+    total_assets = positions_market_value + float(account.current_cash)
+    initial_capital = float(account.initial_capital)
+    return_rate = (total_assets / initial_capital) - 1 if initial_capital > 0 else 0.0
 
     overview = {
         "account": {
@@ -269,8 +290,11 @@ async def _send_snapshot(db: Session, account_id: int):
             "current_cash": float(account.current_cash),
             "frozen_cash": float(account.frozen_cash),
         },
-        "total_assets": positions_value + float(account.current_cash),
-        "positions_value": positions_value,
+        "return_rate": return_rate,
+        "total_assets": total_assets,  # CHANGED: Equity-based total
+        "positions_market_value": positions_market_value,  # CHANGED: Market value
+        "total_notional_value": total_assets,  # DEPRECATED: Keep for compatibility
+        "positions_notional_value": positions_notional_value,  # DEPRECATED: Still available for risk exposure
     }
     # enrich positions with latest price and market value
     enriched_positions = []
@@ -295,8 +319,10 @@ async def _send_snapshot(db: Session, account_id: int):
             "quantity": float(p.quantity),
             "available_quantity": float(p.available_quantity),
             "avg_cost": float(p.avg_cost),
+            "leverage": p.leverage,
             "last_price": float(price) if price is not None else None,
             "market_value": (float(price) * float(p.quantity)) if price is not None else None,
+            "notional_value": (float(price) * float(p.quantity) * p.leverage) if price is not None else None,
         })
 
     # Prepare response data
@@ -316,6 +342,7 @@ async def _send_snapshot(db: Session, account_id: int):
                 "order_type": o.order_type,
                 "price": float(o.price) if o.price is not None else None,
                 "quantity": float(o.quantity),
+                "leverage": o.leverage,
                 "filled_quantity": float(o.filled_quantity),
                 "status": o.status,
             }
@@ -349,6 +376,7 @@ async def _send_snapshot(db: Session, account_id: int):
                 "total_balance": float(d.total_balance),
                 "executed": str(d.executed).lower() if d.executed else "false",
                 "order_id": d.order_id,
+                "leverage": getattr(d, "leverage", 1),
             }
             for d in ai_decisions
         ],
@@ -543,6 +571,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         order_type = msg.get("order_type")
                         price = msg.get("price")
                         quantity = msg.get("quantity")
+                        leverage = msg.get("leverage", 1)
 
                         # Validate required parameters
                         if not all([symbol, side, order_type, quantity]):
@@ -556,6 +585,16 @@ async def websocket_endpoint(websocket: WebSocket):
                             await websocket.send_text(json.dumps({"type": "error", "message": "invalid quantity"}))
                             continue
 
+                        # Validate leverage
+                        try:
+                            leverage = int(leverage)
+                            if leverage < 1 or leverage > 50:
+                                await websocket.send_text(json.dumps({"type": "error", "message": "leverage must be between 1 and 50"}))
+                                continue
+                        except (ValueError, TypeError):
+                            await websocket.send_text(json.dumps({"type": "error", "message": "invalid leverage"}))
+                            continue
+
                         # Create the order
                         order = create_order(
                             db=db,
@@ -565,7 +604,8 @@ async def websocket_endpoint(websocket: WebSocket):
                             side=side,
                             order_type=order_type,
                             price=price,
-                            quantity=quantity
+                            quantity=quantity,
+                            leverage=leverage
                         )
 
                         # Commit the order

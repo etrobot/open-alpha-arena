@@ -1,17 +1,18 @@
 import React from 'react'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Button } from '@/components/ui/button'
 import { toast } from 'react-hot-toast'
 import AssetCurveWithData from './AssetCurveWithData'
 import AccountSelector from '@/components/layout/AccountSelector'
 import TradingPanel from '@/components/trading/TradingPanel'
 import { Doughnut } from 'react-chartjs-2'
-import { Chart as ChartJS, ArcElement, Tooltip, Legend } from 'chart.js'
+import { Chart as ChartJS, ArcElement, Tooltip as ChartTooltip, Legend } from 'chart.js'
 import { AIDecision } from '@/lib/api'
 
 // Register Chart.js components for pie chart
-ChartJS.register(ArcElement, Tooltip, Legend)
+ChartJS.register(ArcElement, ChartTooltip, Legend)
 
 interface Account {
   id: number
@@ -25,8 +26,11 @@ interface Account {
 
 interface Overview {
   account: Account
-  total_assets: number
-  positions_value: number
+  return_rate: number
+  total_assets?: number
+  total_notional_value: number
+  positions_notional_value: number
+  positions_market_value?: number
 }
 
 interface Position {
@@ -39,8 +43,10 @@ interface Position {
   quantity: number
   available_quantity: number
   avg_cost: number
+  leverage: number
   last_price?: number | null
   market_value?: number | null
+  notional_value?: number | null
 }
 
 interface Order {
@@ -53,6 +59,7 @@ interface Order {
   order_type: string
   price?: number
   quantity: number
+  leverage: number
   filled_quantity: number
   status: string
 }
@@ -244,6 +251,7 @@ function OrderBook({ orders, onCancelOrder }: { orders: Order[], onCancelOrder: 
             <TableHead>Type</TableHead>
             <TableHead>Price</TableHead>
             <TableHead>Qty</TableHead>
+            <TableHead>Leverage</TableHead>
             <TableHead>Status</TableHead>
             <TableHead>Actions</TableHead>
           </TableRow>
@@ -258,6 +266,7 @@ function OrderBook({ orders, onCancelOrder }: { orders: Order[], onCancelOrder: 
               <TableCell>{o.order_type}</TableCell>
               <TableCell>{o.price ?? '-'}</TableCell>
               <TableCell>{o.quantity}</TableCell>
+              <TableCell>{o.leverage}</TableCell>
               <TableCell>{o.status}</TableCell>
               <TableCell>
                 {o.status === 'PENDING' ? (
@@ -286,26 +295,27 @@ function PositionList({ positions }: { positions: Position[] }) {
         <TableHeader>
           <TableRow>
             <TableHead>Symbol</TableHead>
-            <TableHead>Name</TableHead>
             <TableHead>Qty</TableHead>
+            <TableHead>Leverage</TableHead>
             <TableHead>Avg Cost</TableHead>
             <TableHead>Last Price</TableHead>
-            <TableHead>Market Value</TableHead>
+            <TableHead>Notional Value</TableHead>
             <TableHead>P&L</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {positions.map(p => {
-            const pnl = p.last_price && p.market_value ? p.market_value - (p.quantity * p.avg_cost) : 0
+            const marketValue = p.last_price ? p.quantity * p.last_price : 0
+            const pnl = p.last_price ? marketValue - (p.quantity * p.avg_cost) : 0
             const pnlPercent = p.avg_cost > 0 ? (pnl / (p.quantity * p.avg_cost)) * 100 : 0
             return (
               <TableRow key={p.id}>
                 <TableCell>{p.symbol}.{p.market}</TableCell>
-                <TableCell>{p.name}</TableCell>
                 <TableCell>{p.quantity.toLocaleString()}</TableCell>
+                <TableCell>{p.leverage}x</TableCell>
                 <TableCell>${p.avg_cost.toFixed(4)}</TableCell>
                 <TableCell>${p.last_price?.toFixed(4) ?? '-'}</TableCell>
-                <TableCell>${p.market_value?.toFixed(2) ?? '-'}</TableCell>
+                <TableCell>${p.notional_value?.toLocaleString(undefined, { maximumFractionDigits: 2 }) ?? '-'}</TableCell>
                 <TableCell className={pnl >= 0 ? 'text-green-600' : 'text-red-600'}>
                   ${pnl.toFixed(2)} ({pnlPercent.toFixed(2)}%)
                 </TableCell>
@@ -367,6 +377,7 @@ function AIDecisionLog({ aiDecisions }: { aiDecisions: AIDecision[] }) {
             <TableHead>Prev %</TableHead>
             <TableHead>Target %</TableHead>
             <TableHead>Balance</TableHead>
+            <TableHead>Leverage</TableHead>
             <TableHead>Executed</TableHead>
             <TableHead>Reason</TableHead>
           </TableRow>
@@ -388,6 +399,7 @@ function AIDecisionLog({ aiDecisions }: { aiDecisions: AIDecision[] }) {
               <TableCell>{((decision.prev_portion || 0) * 100).toFixed(2)}%</TableCell>
               <TableCell>{((decision.target_portion || 0) * 100).toFixed(2)}%</TableCell>
               <TableCell>${(decision.total_balance || 0).toFixed(2)}</TableCell>
+              <TableCell>{decision.leverage ? `${decision.leverage}x` : '-'}</TableCell>
               <TableCell>
                 <span className={`px-2 py-1 rounded text-xs font-medium ${
                   decision.executed === 'true' ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'
@@ -395,8 +407,19 @@ function AIDecisionLog({ aiDecisions }: { aiDecisions: AIDecision[] }) {
                   {decision.executed === 'true' ? 'Yes' : 'No'}
                 </span>
               </TableCell>
-              <TableCell className="max-w-xs truncate" title={decision.reason}>
-                {decision.reason || 'No reason provided'}
+              <TableCell className="max-w-xs">
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <div className="truncate max-w-[200px]">
+                        {decision.reason || 'No reason provided'}
+                      </div>
+                    </TooltipTrigger>
+                    <TooltipContent className="max-w-md p-4 whitespace-pre-wrap">
+                      {decision.reason || 'No reason provided'}
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
               </TableCell>
             </TableRow>
           ))}
@@ -408,14 +431,16 @@ function AIDecisionLog({ aiDecisions }: { aiDecisions: AIDecision[] }) {
 
 // Portfolio Pie Chart Component
 function PortfolioPieChart({ overview, positions }: { overview: Overview, positions: Position[] }) {
-  // Calculate portfolio composition
-  const totalValue = overview.total_assets
+  // Calculate portfolio composition based on notional value (risk exposure)
   const cashValue = overview.account.current_cash
+  
+  // Use backend-calculated positions notional value (sum of quantity * price * leverage)
+  const totalExposure = overview.positions_notional_value
 
   // Group positions by symbol for the pie chart
   const positionData = positions.reduce((acc, position) => {
     const key = `${position.symbol}.${position.market}`
-    const value = position.market_value || 0
+    const value = position.notional_value || 0
     if (acc[key]) {
       acc[key] += value
     } else {
@@ -461,7 +486,8 @@ function PortfolioPieChart({ overview, positions }: { overview: Overview, positi
         callbacks: {
           label: function(context: any) {
             const value = context.parsed
-            const percentage = ((value / totalValue) * 100).toFixed(1)
+            const total = data.reduce((sum, val) => sum + val, 0)
+            const percentage = ((value / total) * 100).toFixed(1)
             return `${context.label}: $${value.toLocaleString()} (${percentage}%)`
           }
         }
@@ -474,13 +500,13 @@ function PortfolioPieChart({ overview, positions }: { overview: Overview, positi
       <div className="h-80 relative">
         <Doughnut data={chartData} options={options} />
         {/* Center Text Overlay */}
-        <div className="absolute inset-0 flex flex-col justify-center pointer-events-none mb-4">
-          <div className="text-center">
-            <div className="text-md font-bold">
-              ${totalValue.toLocaleString()}
+        <div className="absolute inset-0 flex flex-col justify-center items-center pointer-events-none">
+          <div className="text-center mb-12">
+            <div className="text-lg font-bold">
+              ${totalExposure.toLocaleString(undefined, { maximumFractionDigits: 0 })}
             </div>
             <div className="text-xs text-gray-500 mt-1">
-              Total
+              Total Exposure
             </div>
           </div>
         </div>

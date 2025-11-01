@@ -12,7 +12,8 @@ import logging
 from datetime import date, datetime
 
 from database.connection import SessionLocal
-from database.models import Position, CryptoPrice
+from database.models import Position, CryptoPrice, Account, Order
+from decimal import Decimal
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,36 @@ class TaskScheduler:
         )
         
         logger.info(f"Added snapshot task for account {account_id}, interval {interval_seconds} seconds")
+    
+    def add_margin_monitor_task(self, interval_seconds: int = 5):
+        """
+        Add margin monitoring task to watch for liquidation conditions
+        Checks all leveraged positions and force closes if margin is insufficient
+        
+        Args:
+            interval_seconds: Check interval (seconds), default 5 seconds
+        """
+        if not self.is_running():
+            self.start()
+        
+        job_id = "margin_monitor"
+        
+        # Check if task already exists
+        if self.scheduler.get_job(job_id):
+            logger.debug("Margin monitor task already exists")
+            return
+        
+        self.scheduler.add_job(
+            func=self._check_margin_levels,
+            trigger=IntervalTrigger(seconds=interval_seconds),
+            id=job_id,
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=2
+        )
+        
+        logger.info(f"Added margin monitor task, checking every {interval_seconds} seconds")
     
     def remove_account_snapshot_task(self, account_id: int):
         """
@@ -247,6 +278,182 @@ class TaskScheduler:
         except Exception as e:
             logger.error(f"Failed to save account {account_id} position prices: {e}")
             db.rollback()
+    
+    def _check_margin_levels(self):
+        """
+        Check margin levels for all accounts with leveraged positions
+        Force close positions if margin falls below maintenance level
+        """
+        db = SessionLocal()
+        try:
+            # Get all accounts with leveraged positions
+            accounts_with_positions = (
+                db.query(Account)
+                .join(Position, Position.account_id == Account.id)
+                .filter(
+                    Position.quantity > 0,
+                    Position.leverage > 1
+                )
+                .distinct()
+                .all()
+            )
+            
+            if not accounts_with_positions:
+                return
+            
+            for account in accounts_with_positions:
+                try:
+                    self._check_account_margin(db, account)
+                except Exception as e:
+                    logger.error(f"Error checking margin for account {account.name} (ID: {account.id}): {e}")
+            
+            db.commit()
+            
+        except Exception as e:
+            logger.error(f"Error in margin monitoring: {e}")
+            db.rollback()
+        finally:
+            db.close()
+    
+    def _check_account_margin(self, db: Session, account: Account):
+        """
+        Check margin level for a specific account and liquidate if necessary
+        
+        Args:
+            db: Database session
+            account: Account to check
+        """
+        from services.market_data import get_last_price
+        
+        # Get all leveraged positions
+        positions = db.query(Position).filter(
+            Position.account_id == account.id,
+            Position.quantity > 0,
+            Position.leverage > 1
+        ).all()
+        
+        if not positions:
+            return
+        
+        # Calculate current equity (account value)
+        total_position_value = Decimal(0)
+        total_pnl = Decimal(0)
+        
+        for position in positions:
+            try:
+                # Get current market price
+                current_price = get_last_price(position.symbol, position.market)
+                if not current_price or current_price <= 0:
+                    logger.warning(f"Invalid price for {position.symbol}, skipping margin check")
+                    continue
+                
+                current_price = Decimal(str(current_price))
+                quantity = Decimal(str(position.quantity))
+                avg_cost = Decimal(str(position.avg_cost))
+                
+                # Calculate position value
+                position_value = quantity * current_price
+                
+                # Calculate PnL based on position side
+                if position.side == "LONG":
+                    # Long: profit when price goes up
+                    pnl = quantity * (current_price - avg_cost)
+                elif position.side == "SHORT":
+                    # Short: profit when price goes down
+                    pnl = quantity * (avg_cost - current_price)
+                else:
+                    # Default to LONG if side not specified
+                    pnl = quantity * (current_price - avg_cost)
+                
+                total_position_value += position_value
+                total_pnl += pnl
+                
+            except Exception as e:
+                logger.error(f"Error calculating PnL for {position.symbol}: {e}")
+                continue
+        
+        # Calculate equity: cash + unrealized PnL
+        equity = Decimal(str(account.current_cash)) + total_pnl
+        margin_used = Decimal(str(account.margin_used))
+        
+        if margin_used <= 0:
+            # No margin used, nothing to check
+            return
+        
+        # Calculate margin level (equity / margin_used)
+        margin_level = equity / margin_used
+        maintenance_margin_ratio = Decimal(str(account.maintenance_margin_ratio))
+        
+        logger.debug(
+            f"Account {account.name}: equity=${equity:.2f}, margin_used=${margin_used:.2f}, "
+            f"margin_level={margin_level:.2%}, maintenance_required={maintenance_margin_ratio:.2%}"
+        )
+        
+        # Check if margin level is below maintenance requirement
+        if margin_level < maintenance_margin_ratio:
+            logger.warning(
+                f"⚠️ MARGIN CALL! Account {account.name} margin level {margin_level:.2%} "
+                f"below maintenance {maintenance_margin_ratio:.2%}. Liquidating positions..."
+            )
+            
+            # Force close all leveraged positions
+            self._liquidate_positions(db, account, positions, reason="Insufficient margin")
+    
+    def _liquidate_positions(self, db: Session, account: Account, positions: List[Position], reason: str):
+        """
+        Force close (liquidate) all positions for an account
+        
+        Args:
+            db: Database session
+            account: Account being liquidated
+            positions: List of positions to liquidate
+            reason: Reason for liquidation
+        """
+        from services.order_matching import check_and_execute_order
+        import uuid
+        
+        for position in positions:
+            try:
+                if float(position.quantity) <= 0:
+                    continue
+                
+                # Determine close side: SELL closes LONG, BUY closes SHORT
+                close_side = "SELL" if position.side == "LONG" else "BUY"
+                
+                # Create liquidation order
+                order_no = f"LIQ-{uuid.uuid4().hex[:16].upper()}"
+                
+                order = Order(
+                    account_id=account.id,
+                    order_no=order_no,
+                    symbol=position.symbol,
+                    name=position.name,
+                    market=position.market,
+                    side=close_side,
+                    order_type="MARKET",
+                    price=None,  # Market order
+                    quantity=float(position.quantity),
+                    leverage=1,  # Closing orders don't use leverage
+                    filled_quantity=0,
+                    status="PENDING"
+                )
+                
+                db.add(order)
+                db.flush()
+                
+                # Execute immediately
+                executed = check_and_execute_order(db, order)
+                
+                if executed:
+                    logger.warning(
+                        f"🔴 LIQUIDATED: {account.name} {close_side} {position.quantity} {position.symbol} "
+                        f"at market price. Reason: {reason}"
+                    )
+                else:
+                    logger.error(f"Failed to execute liquidation order {order_no} for {position.symbol}")
+                    
+            except Exception as e:
+                logger.error(f"Error liquidating position {position.symbol} for {account.name}: {e}")
 
 
 # Global scheduler instance
@@ -272,6 +479,12 @@ def add_account_snapshot_job(account_id: int, interval_seconds: int = 10):
 def remove_account_snapshot_job(account_id: int):
     """Convenience function to remove account snapshot task"""
     task_scheduler.remove_account_snapshot_task(account_id)
+
+
+def start_margin_monitor(interval_seconds: int = 5):
+    """Start margin monitoring task"""
+    task_scheduler.add_margin_monitor_task(interval_seconds)
+    logger.info(f"Margin monitor started - checking every {interval_seconds} seconds")
 
 
 # Legacy compatibility functions
@@ -353,7 +566,19 @@ def reset_auto_trading_job():
             task_id=AI_TRADE_JOB_ID
         )
         
-        logger.info(f"Auto trading job reset successfully - interval: {AI_TRADE_INTERVAL_SECONDS}s")
+        # Trigger one immediate execution in background so API calls don't block
+        import threading
+        def _run_once():
+            try:
+                logger.info("Triggering immediate AI trade after account save/update")
+                place_ai_driven_crypto_order(max_ratio=0.2)
+            except Exception as run_err:
+                logger.error(f"Immediate AI trade failed: {run_err}")
+        threading.Thread(target=_run_once, name="ai_trade_run_once", daemon=True).start()
+
+        # Log current jobs for verification
+        jobs = task_scheduler.get_job_info()
+        logger.info(f"Auto trading job reset successfully - interval: {AI_TRADE_INTERVAL_SECONDS}s; Jobs: {jobs}")
         
     except Exception as e:
         logger.error(f"Failed to reset auto trading job: {e}")

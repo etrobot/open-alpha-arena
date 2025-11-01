@@ -31,6 +31,6 @@ logger = logging.getLogger(__name__)
 # Backward compatibility - re-export main functions
 # All the actual implementation is now in the split service files
 
-# These constants are kept for backward compatibility
-AUTO_TRADE_JOB_ID = AI_TRADE_JOB_ID
-AI_TRADE_JOB_ID = AI_TRADE_JOB_ID
+# These constants are kept for backward compatibility and re-exported from trading_commands
+# Do not override them here to avoid incorrect ID aliasing
+# AUTO_TRADE_JOB_ID and AI_TRADE_JOB_ID are imported above and used as-is

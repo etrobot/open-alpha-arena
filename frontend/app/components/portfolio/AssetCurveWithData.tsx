@@ -30,6 +30,9 @@ interface AssetCurveData {
   datetime_str?: string
   date?: string
   total_assets: number
+  initial_capital: number
+  profit: number
+  profit_percentage: number
   cash: number
   positions_value: number
   is_initial?: boolean
@@ -45,7 +48,7 @@ interface AssetCurveProps {
 type Timeframe = '5m' | '1h' | '1d'
 
 export default function AssetCurve({ data: initialData, wsRef }: AssetCurveProps) {
-  const [timeframe, setTimeframe] = useState<Timeframe>('1h')
+  const [timeframe, setTimeframe] = useState<Timeframe>('5m')
   const [data, setData] = useState<AssetCurveData[]>(initialData || [])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -131,12 +134,16 @@ export default function AssetCurve({ data: initialData, wsRef }: AssetCurveProps
   }
 
   // Group data by timestamp/date and create datasets for each user
+  // Use explicit profit calculation: profit = total_assets - initial_capital (fallback if profit not provided)
   const groupedData = data.reduce((acc, item) => {
     const key = item.datetime_str || item.date || item.timestamp?.toString() || ''
     if (!acc[key]) {
       acc[key] = {}
     }
-    acc[key][item.username] = item.total_assets
+    const profit = typeof item.profit === 'number' && !Number.isNaN(item.profit)
+      ? item.profit
+      : (item.total_assets ?? 0) - (item.initial_capital ?? 0)
+    acc[key][item.username] = profit
     return acc
   }, {} as Record<string, Record<string, number>>)
 
@@ -227,11 +234,13 @@ export default function AssetCurve({ data: initialData, wsRef }: AssetCurveProps
         display: true,
         title: {
           display: true,
-          text: 'Amount (USD)',
+          text: 'Profit (USD)',
         },
         ticks: {
           callback: function(value) {
-            return '$' + Number(value).toLocaleString('en-US')
+            const num = Number(value)
+            const sign = num >= 0 ? '+' : ''
+            return sign + '$' + num.toLocaleString('en-US')
           },
         },
       },
@@ -279,12 +288,24 @@ export default function AssetCurve({ data: initialData, wsRef }: AssetCurveProps
                   const dateB = new Date(b.datetime_str || b.date || 0).getTime()
                   return dateB - dateA
                 })[0]
+              const profit = latestData
+                ? (typeof latestData.profit === 'number' && !Number.isNaN(latestData.profit)
+                    ? latestData.profit
+                    : (latestData.total_assets ?? 0) - (latestData.initial_capital ?? 0))
+                : 0
+              const initial = latestData?.initial_capital ?? 0
+              const profitPercentage = latestData
+                ? (typeof latestData.profit_percentage === 'number' && !Number.isNaN(latestData.profit_percentage)
+                    ? latestData.profit_percentage
+                    : (initial > 0 ? (profit / initial) * 100 : 0))
+                : 0
               return {
                 username,
-                assets: latestData?.total_assets || 0
+                profit,
+                profitPercentage,
               }
             })
-            .sort((a, b) => b.assets - a.assets)
+            .sort((a, b) => b.profit - a.profit)
             .map((account, index) => (
               <div 
                 key={account.username} 
@@ -295,11 +316,11 @@ export default function AssetCurve({ data: initialData, wsRef }: AssetCurveProps
                   <div className="text-xs font-medium text-secondary-foreground">
                     {account.username.replace('default_', '').toUpperCase()}
                   </div>
-                  <div className="text-lg font-bold text-secondary-foreground">
-                    ${account.assets.toLocaleString('en-US', {
+                  <div className={`text-lg font-bold ${account.profit >= 0 ? 'text-green-500' : 'text-red-500'}`}>
+                    {account.profit >= 0 ? '+' : ''}${account.profit.toLocaleString('en-US', {
                       minimumFractionDigits: 2,
                       maximumFractionDigits: 2,
-                    })}
+                    })} ({account.profit >= 0 ? '+' : ''}{account.profitPercentage.toFixed(2)}%)
                   </div>
                 </div>
               </div>

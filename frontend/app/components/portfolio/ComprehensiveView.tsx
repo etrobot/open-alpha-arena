@@ -13,8 +13,9 @@ interface Account {
 
 interface Overview {
   account: Account
-  total_assets: number
-  positions_value: number
+  return_rate: number
+  total_notional_value: number
+  positions_notional_value: number
 }
 
 interface Position {
@@ -27,8 +28,10 @@ interface Position {
   quantity: number
   available_quantity: number
   avg_cost: number
+  leverage: number
   last_price?: number | null
   market_value?: number | null
+  notional_value?: number | null
 }
 
 interface Order {
@@ -41,6 +44,7 @@ interface Order {
   order_type: string
   price?: number
   quantity: number
+  leverage: number
   filled_quantity: number
   status: string
 }

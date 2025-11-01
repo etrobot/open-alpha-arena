@@ -9,7 +9,7 @@ from services.auto_trader import (
     AUTO_TRADE_JOB_ID,
     AI_TRADE_JOB_ID
 )
-from services.scheduler import start_scheduler, setup_market_tasks, task_scheduler
+from services.scheduler import start_scheduler, setup_market_tasks, task_scheduler, start_margin_monitor
 
 logger = logging.getLogger(__name__)
 
@@ -25,9 +25,22 @@ def initialize_services():
         setup_market_tasks()
         logger.info("Market scheduled tasks have been set up")
 
-        # Start automatic cryptocurrency trading simulation task (5-minute interval)
-        schedule_auto_trading(interval_seconds=300)
-        logger.info("Automatic cryptocurrency trading task started (5-minute interval)")
+        # Start automatic cryptocurrency trading task via reset to ensure market data & proper job ID
+        from services.scheduler import reset_auto_trading_job
+        try:
+            reset_auto_trading_job()
+            # Log current job list
+            jobs = task_scheduler.get_job_info()
+            logger.info(f"Automatic cryptocurrency trading task scheduled via reset (5-minute interval). Jobs: {jobs}")
+        except Exception as e:
+            logger.error(f"Failed to schedule AI auto trading task: {e}")
+            # Fallback to random trading schedule to keep demo functional
+            try:
+                schedule_auto_trading(interval_seconds=300, use_ai=False)
+                jobs = task_scheduler.get_job_info()
+                logger.warning(f"Falling back to random trading schedule. Jobs: {jobs}")
+            except Exception as e2:
+                logger.error(f"Failed to schedule fallback random trading task: {e2}")
         
         # Add price cache cleanup task (every 2 minutes)
         from services.price_cache import clear_expired_prices
@@ -37,6 +50,10 @@ def initialize_services():
             task_id="price_cache_cleanup"
         )
         logger.info("Price cache cleanup task started (2-minute interval)")
+        
+        # Start margin monitoring for leveraged positions (every 5 seconds)
+        start_margin_monitor(interval_seconds=5)
+        logger.info("Margin monitor started (5-second interval)")
         
         logger.info("All services initialized successfully")
         

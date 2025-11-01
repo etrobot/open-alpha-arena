@@ -52,6 +52,10 @@ class Account(Base):
     current_cash = Column(DECIMAL(18, 2), nullable=False, default=10000.00)
     frozen_cash = Column(DECIMAL(18, 2), nullable=False, default=0.00)
     
+    # Margin for leverage trading
+    margin_used = Column(DECIMAL(18, 2), nullable=False, default=0.00)
+    maintenance_margin_ratio = Column(Float, nullable=False, default=0.5)  # 50% of initial margin
+    
     created_at = Column(TIMESTAMP, server_default=func.current_timestamp())
     updated_at = Column(
         TIMESTAMP, server_default=func.current_timestamp(), onupdate=func.current_timestamp()
@@ -87,6 +91,11 @@ class Position(Base):
     quantity = Column(DECIMAL(18, 8), nullable=False, default=0)  # Support fractional crypto amounts
     available_quantity = Column(DECIMAL(18, 8), nullable=False, default=0)
     avg_cost = Column(DECIMAL(18, 6), nullable=False, default=0)
+    leverage = Column(Integer, nullable=False, default=1)  # 加权平均杠杆
+    side = Column(String(10), nullable=True)  # 'LONG' or 'SHORT' for leveraged positions
+    accumulated_interest = Column(DECIMAL(18, 6), nullable=False, default=0)  # 累计利息
+    last_interest_time = Column(DateTime, nullable=True)  # 上次计息时间
+    update_time = Column(DateTime, default=lambda: datetime.datetime.now(datetime.timezone.utc), onupdate=lambda: datetime.datetime.now(datetime.timezone.utc))
     created_at = Column(TIMESTAMP, server_default=func.current_timestamp())
     updated_at = Column(
         TIMESTAMP, server_default=func.current_timestamp(), onupdate=func.current_timestamp()
@@ -106,11 +115,13 @@ class Order(Base):
     name = Column(String(100), nullable=False)   # e.g., 'Bitcoin'
     market = Column(String(10), nullable=False, default="CRYPTO")
     side = Column(String(10), nullable=False)
-    order_type = Column(String(20), nullable=False)
-    price = Column(DECIMAL(18, 6))
-    quantity = Column(DECIMAL(18, 8), nullable=False)  # Support fractional crypto amounts
-    filled_quantity = Column(DECIMAL(18, 8), nullable=False, default=0)
-    status = Column(String(20), nullable=False)
+    order_type = Column(String(20), nullable=False)  # LIMIT, MARKET
+    price = Column(Float, nullable=True)
+    quantity = Column(Float, nullable=False)
+    leverage = Column(Integer, nullable=False, default=1)  # 1 for spot, >1 for leverage
+    filled_quantity = Column(Float, nullable=False, default=0)
+    status = Column(String(20), nullable=False)  # PENDING, FILLED, CANCELED
+    order_time = Column(DateTime, default=lambda: datetime.datetime.now(datetime.timezone.utc))
     created_at = Column(TIMESTAMP, server_default=func.current_timestamp())
     updated_at = Column(
         TIMESTAMP, server_default=func.current_timestamp(), onupdate=func.current_timestamp()
@@ -133,6 +144,8 @@ class Trade(Base):
     price = Column(DECIMAL(18, 6), nullable=False)
     quantity = Column(DECIMAL(18, 8), nullable=False)  # Support fractional crypto amounts
     commission = Column(DECIMAL(18, 6), nullable=False, default=0)
+    taker_fee = Column(DECIMAL(18, 6), nullable=False, default=0)  # 开仓/平仓手续费
+    interest_charged = Column(DECIMAL(18, 6), nullable=False, default=0)  # 此笔交易产生的利息
     trade_time = Column(TIMESTAMP, server_default=func.current_timestamp())
 
     order = relationship("Order", back_populates="trades")
@@ -215,13 +228,14 @@ class AIDecisionLog(Base):
     account_id = Column(Integer, ForeignKey("accounts.id"), nullable=False)
     decision_time = Column(TIMESTAMP, server_default=func.current_timestamp(), index=True)
     reason = Column(String(1000), nullable=False)  # AI reasoning for the decision
-    operation = Column(String(10), nullable=False)  # buy/sell/hold
+    operation = Column(String(10), nullable=False)  # open/close/hold
     symbol = Column(String(20), nullable=True)  # symbol for buy/sell operations
     prev_portion = Column(DECIMAL(10, 6), nullable=False, default=0)  # previous balance portion
     target_portion = Column(DECIMAL(10, 6), nullable=False)  # target balance portion
     total_balance = Column(DECIMAL(18, 2), nullable=False)  # total balance at decision time
     executed = Column(String(10), nullable=False, default="false")  # whether the decision was executed
     order_id = Column(Integer, ForeignKey("orders.id"), nullable=True)  # linked order if executed
+    leverage = Column(Integer, nullable=False, default=1)
     created_at = Column(TIMESTAMP, server_default=func.current_timestamp())
 
     # Relationships
@@ -232,5 +246,11 @@ class AIDecisionLog(Base):
 # CRYPTO market trading configuration constants
 CRYPTO_MIN_COMMISSION = 0.1  # $0.1 minimum commission
 CRYPTO_COMMISSION_RATE = 0.001  # 0.1% commission rate
-CRYPTO_MIN_ORDER_QUANTITY = 1
-CRYPTO_LOT_SIZE = 1
+CRYPTO_MIN_ORDER_QUANTITY = 0.0001  # Minimum 0.0001 BTC (supports fractional crypto)
+CRYPTO_LOT_SIZE = 0.0001  # Lot size for crypto
+
+# Leverage trading constants (Hyperliquid-style)
+CRYPTO_TAKER_FEE_RATE = 0.0007  # 0.07% taker fee
+CRYPTO_INTEREST_RATE_HOURLY = 0.0000125  # 0.00125%/hour (0.03%/day)
+CRYPTO_MAX_LEVERAGE = 50  # Maximum leverage allowed
+CRYPTO_MAINTENANCE_MARGIN_RATIO = 0.5  # 50% of initial margin

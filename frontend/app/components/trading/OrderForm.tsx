@@ -16,10 +16,14 @@ interface OrderFormProps {
   orderType: 'MARKET' | 'LIMIT'
   price: number
   quantity: number
+  leverage?: number
+  side?: 'LONG' | 'SHORT' | 'BUY' | 'SELL'
   onSymbolChange: (symbol: string) => void
   onOrderTypeChange: (orderType: 'MARKET' | 'LIMIT') => void
   onPriceChange: (price: number) => void
   onQuantityChange: (quantity: number) => void
+  onLeverageChange?: (leverage: number) => void
+  onSideChange?: (side: 'LONG' | 'SHORT' | 'BUY' | 'SELL') => void
   onAdjustPrice: (delta: number) => void
   onAdjustQuantity: (delta: number) => void
   lastPrices?: Record<string, number | null>
@@ -30,10 +34,14 @@ export default function OrderForm({
   orderType,
   price,
   quantity,
+  leverage = 1,
+  side = 'LONG',
   onSymbolChange,
   onOrderTypeChange,
   onPriceChange,
   onQuantityChange,
+  onLeverageChange,
+  onSideChange,
   onAdjustPrice,
   onAdjustQuantity,
   lastPrices = {}
@@ -246,6 +254,73 @@ export default function OrderForm({
           </Button>
         </div>
       </div>
+
+      {/* Leverage */}
+      {onLeverageChange && (
+        <div className="space-y-2">
+          <div className="flex items-center gap-1">
+            <label className="text-xs text-muted-foreground">Leverage</label>
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-info w-3 h-3 text-muted-foreground">
+              <circle cx="12" cy="12" r="10"></circle>
+              <path d="M12 16v-4"></path>
+              <path d="M12 8h.01"></path>
+            </svg>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button 
+              onClick={() => onLeverageChange(Math.max(1, leverage - 1))}
+              variant="outline"
+              size="sm"
+            >
+              -
+            </Button>
+            <div className="relative flex-1">
+              <Input 
+                inputMode="numeric"
+                value={leverage}
+                onChange={(e) => {
+                  const val = parseInt(e.target.value) || 1
+                  onLeverageChange(Math.max(1, Math.min(50, val)))
+                }}
+                className="text-center text-xs h-7"
+              />
+            </div>
+            <Button 
+              onClick={() => onLeverageChange(Math.min(50, leverage + 1))}
+              variant="outline"
+              size="sm"
+            >
+              +
+            </Button>
+            <span className="text-xs text-muted-foreground min-w-[20px]">x</span>
+          </div>
+        </div>
+      )}
+
+      {/* Side (Position Direction) */}
+      {onSideChange && (
+        <div className="space-y-2">
+          <div className="flex items-center gap-1">
+            <label className="text-xs text-muted-foreground">Side</label>
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-info w-3 h-3 text-muted-foreground">
+              <circle cx="12" cy="12" r="10"></circle>
+              <path d="M12 16v-4"></path>
+              <path d="M12 8h.01"></path>
+            </svg>
+          </div>
+          <Select value={side} onValueChange={(v) => onSideChange(v as 'LONG' | 'SHORT' | 'BUY' | 'SELL')}>
+            <SelectTrigger className="bg-input text-xs h-6">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="LONG">Long (Open)</SelectItem>
+              <SelectItem value="SHORT">Short (Open)</SelectItem>
+              <SelectItem value="SELL">Sell (Close Long)</SelectItem>
+              <SelectItem value="BUY">Buy (Close Short)</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      )}
     </div>
   )
 }

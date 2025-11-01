@@ -23,7 +23,7 @@ def _calc_commission(notional: Decimal) -> Decimal:
 
 
 def create_order(db: Session, account: Account, symbol: str, name: str,
-                side: str, order_type: str, price: Optional[float], quantity: float) -> Order:
+                side: str, order_type: str, price: Optional[float], quantity: float, leverage: int = 1) -> Order:
     """
     Create limit order
 
@@ -72,9 +72,14 @@ def create_order(db: Session, account: Account, symbol: str, name: str,
     # Pre-check funds and positions
     if side == "BUY":
         # Buy: check if sufficient cash available
-        notional = check_price * Decimal(quantity)
+        notional = check_price * Decimal(str(quantity))
         commission = _calc_commission(notional)
-        cash_needed = notional + commission
+
+        if leverage > 1:
+            initial_margin = notional / Decimal(str(leverage))
+            cash_needed = initial_margin + commission
+        else: # 现货
+            cash_needed = notional + commission
 
         if Decimal(str(account.current_cash)) < cash_needed:
             raise ValueError(f"Insufficient cash. Need ${cash_needed:.2f}, current cash ${account.current_cash:.2f}")
@@ -103,6 +108,7 @@ def create_order(db: Session, account: Account, symbol: str, name: str,
         order_type=order_type,
         price=price,
         quantity=quantity,
+        leverage=leverage,
         filled_quantity=0,
         status="PENDING",
     )
@@ -205,13 +211,19 @@ def _execute_order(db: Session, order: Order, account: Account, execution_price:
         Whether execution was successful
     """
     try:
-        quantity = Decimal(str(order.quantity))  # Ensure quantity is Decimal
+        quantity = Decimal(str(order.quantity))
         notional = execution_price * quantity
         commission = _calc_commission(notional)
-        
+        leverage = Decimal(str(order.leverage))
+
         # Re-check funds and positions (prevent concurrency issues)
         if order.side == "BUY":
-            cash_needed = notional + commission
+            if leverage > 1:
+                initial_margin = notional / leverage
+                cash_needed = initial_margin + commission
+            else:
+                cash_needed = notional + commission
+            
             if Decimal(str(account.current_cash)) < cash_needed:
                 logger.warning(f"Insufficient cash when executing order {order.order_no}")
                 return False
@@ -236,24 +248,33 @@ def _execute_order(db: Session, order: Order, account: Account, execution_price:
                     quantity=0,
                     available_quantity=0,
                     avg_cost=0,
+                    leverage=1,
                 )
                 db.add(position)
                 db.flush()
             
-            # Calculate new average cost (use Decimal for precision)
+            # Calculate new average cost and leverage (use Decimal for precision)
             old_qty = Decimal(str(position.quantity))
             old_cost = Decimal(str(position.avg_cost))
+            old_leverage = Decimal(str(position.leverage))
+
             new_qty = old_qty + quantity
             
             if old_qty == 0:
                 new_avg_cost = execution_price
+                new_leverage = leverage
             else:
-                new_avg_cost = (old_cost * old_qty + notional) / new_qty
-            
-            position.quantity = float(new_qty)  # Store as float for database
+                old_notional = old_cost * old_qty
+                new_notional = notional + old_notional
+                new_avg_cost = new_notional / new_qty
+                # Update leverage (weighted average)
+                new_leverage = (old_notional * old_leverage + notional * leverage) / new_notional
+
+            position.quantity = float(new_qty)
             position.available_quantity = float(Decimal(str(position.available_quantity)) + quantity)
             position.avg_cost = float(new_avg_cost)
-            
+            position.leverage = int(new_leverage)
+
         else:  # SELL
             # Check position
             position = (
@@ -270,8 +291,24 @@ def _execute_order(db: Session, order: Order, account: Account, execution_price:
             position.quantity = float(Decimal(str(position.quantity)) - quantity)
             position.available_quantity = float(Decimal(str(position.available_quantity)) - quantity)
             
-            # Add cash
-            cash_gain = notional - commission
+            # PnL and cash gain calculation for leveraged positions
+            sell_notional = notional
+            commission = _calc_commission(sell_notional)
+            position_leverage = Decimal(str(position.leverage))
+            
+            if position_leverage > 1:
+                # 杠杆仓位卖出，需要计算 PnL
+                entry_price = Decimal(str(position.avg_cost))
+                pnl = (execution_price - entry_price) * quantity
+                
+                # 释放的保证金
+                initial_margin_part = (entry_price * quantity) / position_leverage
+                
+                cash_gain = initial_margin_part + pnl - commission
+            else:
+                # 现货卖出
+                cash_gain = sell_notional - commission
+
             account.current_cash = float(Decimal(str(account.current_cash)) + cash_gain)
         
         # Create trade record

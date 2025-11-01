@@ -48,6 +48,9 @@ def get_all_asset_curves_data_new(db: Session, timeframe: str = "1h") -> List[Di
                 "user_id": account.user_id,
                 "username": account.name,
                 "total_assets": float(account.initial_capital),
+                "initial_capital": float(account.initial_capital),
+                "profit": 0.0,
+                "profit_percentage": 0.0,
                 "cash": float(account.initial_capital),
                 "positions_value": 0.0,
             } for account in accounts]
@@ -75,6 +78,9 @@ def get_all_asset_curves_data_new(db: Session, timeframe: str = "1h") -> List[Di
                 "user_id": account.user_id,
                 "username": account.name,
                 "total_assets": float(account.initial_capital),
+                "initial_capital": float(account.initial_capital),
+                "profit": 0.0,
+                "profit_percentage": 0.0,
                 "cash": float(account.initial_capital),
                 "positions_value": 0.0,
             } for account in accounts]
@@ -143,6 +149,9 @@ def _create_account_timeline(
             "user_id": account.user_id,
             "username": account.name,
             "total_assets": float(account.initial_capital),
+            "initial_capital": float(account.initial_capital),
+            "profit": 0.0,
+            "profit_percentage": 0.0,
             "cash": float(account.initial_capital),
             "positions_value": 0.0,
         } for i, ts in enumerate(timestamps)]
@@ -151,8 +160,13 @@ def _create_account_timeline(
     timeline = []
     first_klines = next(iter(symbol_klines.values()))
     
+    # Check if we should use actual account.current_cash for the last timestamp
+    # This handles cases where cash was adjusted outside of trade history
+    use_actual_cash_for_last = len(timestamps) > 0
+    
     for i, ts in enumerate(timestamps):
         ts_datetime = datetime.fromtimestamp(ts, tz=timezone.utc)
+        is_last_timestamp = (i == len(timestamps) - 1)
         
         # Calculate cash and positions up to this timestamp
         cash_change = 0.0
@@ -164,11 +178,11 @@ def _create_account_timeline(
                 trade_time = trade_time.replace(tzinfo=timezone.utc)
             
             if trade_time <= ts_datetime:
-                # Update cash based on trade
-                trade_amount = float(trade.price) * float(trade.quantity) + float(trade.commission)
-                if trade.side == "BUY":
+                # Update cash based on trade (include commission and interest)
+                trade_amount = float(trade.price) * float(trade.quantity) + float(trade.commission) + float(trade.interest_charged)
+                if trade.side == "BUY" or trade.side == "LONG":
                     cash_change -= trade_amount
-                else:  # SELL
+                else:  # SELL or SHORT
                     cash_change += trade_amount
                 
                 # Update position quantity
@@ -176,24 +190,72 @@ def _create_account_timeline(
                 if key not in position_quantities:
                     position_quantities[key] = 0.0
                 
-                if trade.side == "BUY":
+                if trade.side == "BUY" or trade.side == "LONG":
                     position_quantities[key] += float(trade.quantity)
-                else:  # SELL
+                else:  # SELL or SHORT
                     position_quantities[key] -= float(trade.quantity)
         
-        # Current cash = initial capital + net cash changes from trades
-        current_cash = float(account.initial_capital) + cash_change
+        # For the last timestamp, use actual current_cash to account for any realized P&L or adjustments
+        # For historical points, reconstruct from initial capital + cash changes
+        if is_last_timestamp and use_actual_cash_for_last:
+            current_cash = float(account.current_cash)
+        else:
+            current_cash = float(account.initial_capital) + cash_change
         
-        # Calculate positions value using prices at this timestamp
+        # Calculate positions MARKET VALUE using prices at this timestamp
+        # Market value = quantity * price (NOT * leverage!)
+        # Leverage only affects margin requirement, not the position's equity value
         positions_value = 0.0
-        for (symbol, market), quantity in position_quantities.items():
-            if quantity > 0 and (symbol, market) in symbol_klines:
-                klines = symbol_klines[(symbol, market)]
-                if i < len(klines) and klines[i]['close']:
-                    price = float(klines[i]['close'])
-                    positions_value += price * quantity
+        
+        # For the last timestamp, use actual Position table data to get accurate current positions
+        if is_last_timestamp and use_actual_cash_for_last:
+            from database.models import Position
+            from services.market_data import get_last_price
+            from decimal import Decimal
+            positions = db.query(Position).filter(Position.account_id == account.id).all()
+            for pos in positions:
+                if pos.quantity > 0:
+                    try:
+                        price = get_last_price(pos.symbol, pos.market)
+                        if price and price > 0:
+                            price_dec = Decimal(str(price))
+                            quantity_dec = Decimal(str(pos.quantity))
+                            avg_cost_dec = Decimal(str(pos.avg_cost))
+                            leverage_dec = Decimal(str(pos.leverage)) if pos.leverage and pos.leverage > 0 else Decimal("1")
+                            
+                            # Market value of position
+                            market_value = quantity_dec * price_dec
+                            
+                            # For leveraged positions, only count margin + unrealized P&L
+                            if leverage_dec > 1:
+                                # Initial margin used
+                                initial_margin = market_value / leverage_dec
+                                # Unrealized P&L
+                                unrealized_pnl = quantity_dec * (price_dec - avg_cost_dec)
+                                # Position equity = margin + P&L
+                                position_equity = initial_margin + unrealized_pnl
+                            else:
+                                # Non-leveraged position: equity = market value
+                                position_equity = market_value
+                            
+                            positions_value += float(position_equity)
+                    except Exception as e:
+                        logging.warning(f"Could not get price for {pos.symbol}.{pos.market}: {e}")
+        else:
+            # For historical points, reconstruct from trades
+            for (symbol, market), quantity in position_quantities.items():
+                if quantity > 0 and (symbol, market) in symbol_klines:
+                    klines = symbol_klines[(symbol, market)]
+                    if i < len(klines) and klines[i]['close']:
+                        price = float(klines[i]['close'])
+                        # Market value (equity) = price * quantity
+                        positions_value += price * quantity
         
         total_assets = current_cash + positions_value
+        # Calculate profit: total_assets - initial_capital
+        profit = total_assets - float(account.initial_capital)
+        # Calculate profit percentage
+        profit_percentage = (profit / float(account.initial_capital)) * 100 if float(account.initial_capital) > 0 else 0
         
         timeline.append({
             "timestamp": ts,
@@ -202,6 +264,9 @@ def _create_account_timeline(
             "user_id": account.user_id,
             "username": account.name,
             "total_assets": total_assets,
+            "initial_capital": float(account.initial_capital),
+            "profit": profit,
+            "profit_percentage": profit_percentage,
             "cash": current_cash,
             "positions_value": positions_value,
         })
@@ -250,6 +315,9 @@ def get_account_asset_curve(db: Session, account_id: int, timeframe: str = "1h")
                 "user_id": account.user_id,
                 "username": account.name,
                 "total_assets": float(account.initial_capital),
+                "initial_capital": float(account.initial_capital),
+                "profit": 0.0,
+                "profit_percentage": 0.0,
                 "cash": float(account.initial_capital),
                 "positions_value": 0.0,
             }]
@@ -274,6 +342,9 @@ def get_account_asset_curve(db: Session, account_id: int, timeframe: str = "1h")
                 "user_id": account.user_id,
                 "username": account.name,
                 "total_assets": float(account.initial_capital),
+                "initial_capital": float(account.initial_capital),
+                "profit": 0.0,
+                "profit_percentage": 0.0,
                 "cash": float(account.initial_capital),
                 "positions_value": 0.0,
             }]

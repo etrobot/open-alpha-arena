@@ -9,7 +9,7 @@ import {
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Trash2, Plus, Pencil } from 'lucide-react'
+import { Plus, Pencil } from 'lucide-react'
 import { 
   getAccounts as getAccounts,
   createAccount as createAccount,

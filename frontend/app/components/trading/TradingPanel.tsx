@@ -26,10 +26,14 @@ export default function TradingPanel({ onPlace, user, positions = [], lastPrices
   const [orderType, setOrderType] = useState<'MARKET' | 'LIMIT'>('LIMIT')
   const [price, setPrice] = useState<number>(190)
   const [quantity, setQuantity] = useState<number>(2)
+  const [leverage, setLeverage] = useState<number>(1)
+  const [side, setSide] = useState<'LONG' | 'SHORT' | 'BUY' | 'SELL'>('LONG')
   const [showPasswordDialog, setShowPasswordDialog] = useState<boolean>(false)
   const [pendingTrade, setPendingTrade] = useState<{side: 'BUY' | 'SELL'} | null>(null)
   const [authSessionToken, setAuthSessionToken] = useState<string>('')
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false)
+  
+  const name = symbol // Use symbol as name
 
   // When switching to MARKET, price refreshes with latest quote from WS/parent component
   const onSelectOrderType = (v: 'MARKET' | 'LIMIT') => {
@@ -120,20 +124,37 @@ export default function TradingPanel({ onPlace, user, positions = [], lastPrices
       setPendingTrade(null)
   }
 
-  const handleBuy = () => {
+  const handlePlaceOrder = () => {
+    // Validate price
     if (orderType === 'LIMIT' && price <= 0) {
       toast.error('Please input a valid limit price')
       return
     }
+    
+    // Validate quantity
     if (quantity <= 0 || !Number.isFinite(quantity)) {
       toast.error('Please input a valid quantity')
       return
     }
-    const amount = price * quantity
-    const cashAvailable = user?.current_cash ?? 0
-    if (amount > cashAvailable) {
-      toast.error('Insufficient available cash')
-      return
+    
+    // Validate based on side
+    if (side === 'LONG' || side === 'SHORT') {
+      // Opening position - check cash
+      const notional = price * quantity
+      const marginNeeded = leverage > 1 ? notional / leverage : notional
+      const cashAvailable = user?.current_cash ?? 0
+      
+      if (marginNeeded > cashAvailable) {
+        toast.error(`Insufficient cash. Need $${marginNeeded.toFixed(2)} (${leverage}x leverage)`)
+        return
+      }
+    } else {
+      // Closing position - check available position
+      const positionAvailable = positions.find(p => p.symbol === symbol && p.market === market)?.available_quantity || 0
+      if (quantity > positionAvailable) {
+        toast.error('Insufficient position to close')
+        return
+      }
     }
     
     // If already authenticated, trade directly
@@ -142,51 +163,17 @@ export default function TradingPanel({ onPlace, user, positions = [], lastPrices
         symbol,
         name,
         market,
-        side: 'BUY',
+        side,
         order_type: orderType,
         price: orderType === 'LIMIT' ? price : undefined,
         quantity,
+        leverage,
         session_token: authSessionToken
       }
       onPlace(orderData)
     } else {
       // Not authenticated, show password dialog
-      setPendingTrade({side: 'BUY'})
-      setShowPasswordDialog(true)
-    }
-  }
-
-  const handleSell = () => {
-    if (orderType === 'LIMIT' && price <= 0) {
-      toast.error('Please input a valid limit price')
-      return
-    }
-    if (quantity <= 0 || !Number.isFinite(quantity)) {
-      toast.error('Please input a valid quantity')
-      return
-    }
-    const positionAvailable = positions.find(p => p.symbol === symbol && p.market === market)?.available_quantity || 0
-    if (quantity > positionAvailable) {
-      toast.error('Insufficient sellable position')
-      return
-    }
-    
-    // If already authenticated, trade directly
-    if (isAuthenticated && authSessionToken) {
-      const orderData: any = {
-        symbol,
-        name,
-        market,
-        side: 'SELL',
-        order_type: orderType,
-        price: orderType === 'LIMIT' ? price : undefined,
-        quantity,
-        session_token: authSessionToken
-      }
-      onPlace(orderData)
-    } else {
-      // Not authenticated, show password dialog
-      setPendingTrade({side: 'SELL'})
+      setPendingTrade({side: side as 'BUY' | 'SELL'})
       setShowPasswordDialog(true)
     }
   }
@@ -198,10 +185,14 @@ export default function TradingPanel({ onPlace, user, positions = [], lastPrices
         orderType={orderType}
         price={price}
         quantity={quantity}
+        leverage={leverage}
+        side={side}
         onSymbolChange={setSymbol}
         onOrderTypeChange={onSelectOrderType}
         onPriceChange={setPrice}
         onQuantityChange={setQuantity}
+        onLeverageChange={setLeverage}
+        onSideChange={setSide}
         onAdjustPrice={adjustPrice}
         onAdjustQuantity={adjustQuantity}
         lastPrices={lastPrices}
@@ -213,11 +204,12 @@ export default function TradingPanel({ onPlace, user, positions = [], lastPrices
         orderType={orderType}
         price={price}
         quantity={quantity}
+        leverage={leverage}
+        side={side}
         user={user}
         positions={positions}
         lastPrices={lastPrices}
-        onBuy={handleBuy}
-        onSell={handleSell}
+        onPlaceOrder={handlePlaceOrder}
       />
 
       <AuthDialog
@@ -229,10 +221,11 @@ export default function TradingPanel({ onPlace, user, positions = [], lastPrices
         orderData={{
           symbol,
           market,
-          side: pendingTrade?.side || 'BUY',
+          side,
           order_type: orderType,
           price: orderType === 'LIMIT' ? price : undefined,
-          quantity
+          quantity,
+          leverage
         }}
       />
     </div>

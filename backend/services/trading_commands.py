@@ -13,6 +13,7 @@ from database.models import Position, Account
 from services.asset_calculator import calc_positions_value
 from services.market_data import get_last_price
 from services.order_matching import create_order, check_and_execute_order
+from services.order_executor_leverage import place_and_execute_crypto
 from services.ai_decision_service import (
     call_ai_for_decision, 
     save_ai_decision, 
@@ -114,13 +115,14 @@ def place_ai_driven_crypto_order(max_ratio: float = 0.2) -> None:
 
                 operation = decision.get("operation", "").lower() if decision.get("operation") else ""
                 symbol = decision.get("symbol", "").upper() if decision.get("symbol") else ""
+                direction = decision.get("direction", "long").lower() if decision.get("direction") else "long"
                 target_portion = float(decision.get("target_portion_of_balance", 0)) if decision.get("target_portion_of_balance") is not None else 0
                 reason = decision.get("reason", "No reason provided")
 
-                logger.info(f"AI decision for {account.name}: {operation} {symbol} (portion: {target_portion:.2%}) - {reason}")
+                logger.info(f"AI decision for {account.name}: {operation} {symbol} {direction} (portion: {target_portion:.2%}) - {reason}")
 
                 # Validate decision
-                if operation not in ["buy", "sell", "hold"]:
+                if operation not in ["open", "close", "hold"]:
                     logger.warning(f"Invalid operation '{operation}' from AI for {account.name}, skipping")
                     # Save invalid decision for debugging
                     save_ai_decision(db, account, decision, portfolio, executed=False)
@@ -134,6 +136,12 @@ def place_ai_driven_crypto_order(max_ratio: float = 0.2) -> None:
 
                 if symbol not in SUPPORTED_SYMBOLS:
                     logger.warning(f"Invalid symbol '{symbol}' from AI for {account.name}, skipping")
+                    # Save invalid decision for debugging
+                    save_ai_decision(db, account, decision, portfolio, executed=False)
+                    continue
+                
+                if direction not in ["long", "short"]:
+                    logger.warning(f"Invalid direction '{direction}' from AI for {account.name}, skipping")
                     # Save invalid decision for debugging
                     save_ai_decision(db, account, decision, portfolio, executed=False)
                     continue
@@ -153,8 +161,20 @@ def place_ai_driven_crypto_order(max_ratio: float = 0.2) -> None:
                     continue
 
                 # Calculate quantity based on operation
-                if operation == "buy":
-                    # Calculate quantity based on available cash and target portion
+                if operation == "open":
+                    # Check if there's already a position on this coin (ONE position per coin rule)
+                    existing_position = (
+                        db.query(Position)
+                        .filter(Position.account_id == account.id, Position.symbol == symbol, Position.market == "CRYPTO")
+                        .first()
+                    )
+                    
+                    if existing_position and float(existing_position.quantity) > 0:
+                        logger.warning(f"Cannot open {direction} position on {symbol} - already have a {existing_position.side} position. Only ONE position per coin allowed. Close existing position first.")
+                        save_ai_decision(db, account, decision, portfolio, executed=False)
+                        continue
+                    
+                    # Open a new position - calculate quantity based on available cash and target portion
                     available_cash = float(account.current_cash)
                     order_value = available_cash * target_portion
                     # For crypto, support fractional quantities - use float instead of int
@@ -164,70 +184,91 @@ def place_ai_driven_crypto_order(max_ratio: float = 0.2) -> None:
                     quantity = round(quantity, 6)
                     
                     if quantity <= 0:
-                        logger.info(f"Calculated BUY quantity <= 0 for {symbol} for {account.name}, skipping")
+                        logger.info(f"Calculated {direction.upper()} quantity <= 0 for {symbol} for {account.name}, skipping")
                         # Save decision with execution failure
                         save_ai_decision(db, account, decision, portfolio, executed=False)
                         continue
                     
-                    side = "BUY"
+                    # Set side based on direction
+                    side = "LONG" if direction == "long" else "SHORT"
 
-                elif operation == "sell":
-                    # Calculate quantity based on position and target portion
+                elif operation == "close":
+                    # Close a position - calculate quantity based on position and target portion
                     position = (
                         db.query(Position)
                         .filter(Position.account_id == account.id, Position.symbol == symbol, Position.market == "CRYPTO")
                         .first()
                     )
                     
-                    if not position or float(position.available_quantity) <= 0:
-                        logger.info(f"No position available to SELL for {symbol} for {account.name}, skipping")
+                    if not position or float(position.quantity) <= 0:
+                        logger.warning(f"No position available to close for {symbol} for {account.name}, skipping")
                         # Save decision with execution failure
                         save_ai_decision(db, account, decision, portfolio, executed=False)
                         continue
                     
-                    available_quantity = int(position.available_quantity)
-                    quantity = max(1, int(available_quantity * target_portion))
+                    # Validate that direction matches the position side
+                    position_side = (position.side or "LONG").lower()
+                    if position_side != direction:
+                        logger.warning(f"Cannot close {direction} position on {symbol} - current position is {position_side.upper()}. Direction mismatch!")
+                        save_ai_decision(db, account, decision, portfolio, executed=False)
+                        continue
                     
-                    if quantity > available_quantity:
-                        quantity = available_quantity
+                    # For leveraged positions, use total quantity; for spot, use available_quantity
+                    if position.leverage > 1:
+                        position_quantity = float(position.quantity)
+                    else:
+                        position_quantity = float(position.available_quantity)
                     
-                    side = "SELL"
+                    # Calculate quantity to close (support fractional for crypto)
+                    quantity = position_quantity * target_portion
+                    
+                    # Round to reasonable precision (6 decimal places for crypto)
+                    quantity = round(quantity, 6)
+                    
+                    if quantity > position_quantity:
+                        quantity = position_quantity
+                    
+                    if quantity <= 0:
+                        logger.info(f"Calculated close quantity <= 0 for {symbol} for {account.name}, skipping")
+                        save_ai_decision(db, account, decision, portfolio, executed=False)
+                        continue
+                    
+                    # Set side to close the position: SELL closes LONG, BUY closes SHORT
+                    side = "SELL" if direction == "long" else "BUY"
                 
                 else:
                     continue
 
-                # Create and execute order
+                leverage = int(decision.get("leverage", 1)) or 1
+                # Create and execute order using leverage-aware function
                 name = SUPPORTED_SYMBOLS[symbol]
                 
-                order = create_order(
-                    db=db,
-                    account=account,
-                    symbol=symbol,
-                    name=name,
-                    side=side,
-                    order_type="MARKET",
-                    price=None,
-                    quantity=quantity,
-                )
-
-                db.commit()
-                db.refresh(order)
-
-                executed = check_and_execute_order(db, order)
-                if executed:
-                    db.refresh(order)
-                    logger.info(
-                        f"AI order executed: account={account.name} {side} {symbol} {order.order_no} "
-                        f"quantity={quantity} reason='{reason}'"
+                order = None
+                executed = False
+                try:
+                    order = place_and_execute_crypto(
+                        db=db,
+                        account=account,
+                        symbol=symbol,
+                        name=name,
+                        side=side,
+                        order_type="MARKET",
+                        price=None,
+                        quantity=quantity,
+                        leverage=leverage
                     )
-                else:
+                    
                     logger.info(
-                        f"AI order created but not executed: account={account.name} {side} {symbol} "
-                        f"quantity={quantity} order_id={order.order_no} reason='{reason}'"
+                        f"✅ AI order executed: account={account.name} {operation.upper()} {direction.upper()} {side} {symbol} {order.order_no} quantity={quantity} leverage={leverage}x reason='{reason}'"
                     )
+                    executed = True
+                except Exception as e:
+                    logger.error(f"Failed to execute order for {account.name}: {e}")
+                    executed = False
                 
                 # Save decision with final execution status (only called once)
-                save_ai_decision(db, account, decision, portfolio, executed=executed, order_id=order.id)
+                order_id = order.id if order else None
+                save_ai_decision(db, account, decision, portfolio, executed=executed, order_id=order_id)
 
             except Exception as account_err:
                 logger.error(f"AI-driven order placement failed for account {account.name}: {account_err}", exc_info=True)

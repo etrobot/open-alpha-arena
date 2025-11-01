@@ -43,6 +43,7 @@ class OrderOut(BaseModel):
     order_type: str
     price: Optional[float]
     quantity: int
+    leverage: int
     filled_quantity: int
     status: str
 

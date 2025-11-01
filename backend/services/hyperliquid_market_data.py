@@ -208,3 +208,78 @@ def get_market_status_from_hyperliquid(symbol: str) -> Dict[str, Any]:
 def get_all_symbols_from_hyperliquid() -> List[str]:
     """Get all available symbols from Hyperliquid"""
     return hyperliquid_client.get_all_symbols()
+
+
+def hyperliquid_trade_cost(
+    side: str,
+    entry_price: float,
+    position_size: float,
+    leverage: float,
+    taker_fee_rate: float = 0.0007,      # Default 0.07%
+    interest_rate_hourly: float = 0.0000125,  # Default 0.00125%/hour
+    holding_hours: float = 8.0            # Holding period (hours)
+) -> dict:
+    """
+    Calculate fees, interest, liquidation price, etc. for Hyperliquid leveraged positions.
+
+    Args:
+      - side: "long" or "short"
+      - entry_price: Entry price
+      - position_size: Notional value (USD)
+      - leverage: Leverage multiple
+      - taker_fee_rate: Trading fee rate
+      - interest_rate_hourly: Hourly borrowing rate
+      - holding_hours: Holding period in hours
+
+    Returns:
+      dict containing:
+      - initial_margin / maintenance_margin
+      - open_fee / close_fee / interest_cost / total_trade_cost
+      - liquidation_price / liquidation_fee / liquidation_interest / total_liquidation_cost
+    """
+    side = side.lower()
+    assert side in ("long", "short"), "side must be 'long' or 'short'"
+
+    # === Margin ===
+    initial_margin = position_size / leverage
+    maintenance_margin = initial_margin / 2  # Typically liquidation line is half of initial margin
+
+    # === 手续费 ===
+    open_fee = position_size * taker_fee_rate
+    close_fee = position_size * taker_fee_rate
+    total_fee = open_fee + close_fee
+
+    # === 利息 ===
+    interest_cost = position_size * interest_rate_hourly * holding_hours
+
+    # === 交易总成本 ===
+    total_trade_cost = initial_margin + total_fee + interest_cost
+
+    # === 强平价格 ===
+    if side == "long":
+        liquidation_price = entry_price * leverage / (
+            leverage + 1 - (maintenance_margin / initial_margin * leverage)
+        )
+    else:
+        liquidation_price = entry_price * leverage / (
+            leverage - 1 + (maintenance_margin / initial_margin * leverage)
+        )
+
+    # === 强平费用 ===
+    liquidation_fee = position_size * taker_fee_rate
+    liquidation_interest = position_size * interest_rate_hourly * holding_hours
+    total_liquidation_cost = liquidation_fee + liquidation_interest
+
+    return {
+        "side": side,
+        "initial_margin": initial_margin,
+        "maintenance_margin": maintenance_margin,
+        "open_fee": open_fee,
+        "close_fee": close_fee,
+        "interest_cost": interest_cost,
+        "total_trade_cost": total_trade_cost,
+        "liquidation_price": liquidation_price,
+        "liquidation_fee": liquidation_fee,
+        "liquidation_interest": liquidation_interest,
+        "total_liquidation_cost": total_liquidation_cost
+    }

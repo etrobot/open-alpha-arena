@@ -334,6 +334,9 @@ async def get_asset_curve_by_timeframe(
                 "user_id": account.user_id,
                 "username": account.name,
                 "total_assets": float(account.initial_capital),
+                "initial_capital": float(account.initial_capital),
+                "profit": 0.0,
+                "profit_percentage": 0.0,
                 "cash": float(account.current_cash),
                 "positions_value": 0.0,
             } for account in accounts]
@@ -377,6 +380,9 @@ async def get_asset_curve_by_timeframe(
                         "user_id": account.user_id,
                         "username": account.name,
                         "total_assets": float(account.initial_capital),
+                        "initial_capital": float(account.initial_capital),
+                        "profit": 0.0,
+                        "profit_percentage": 0.0,
                         "cash": float(account.initial_capital),
                         "positions_value": 0.0,
                     })
@@ -385,6 +391,7 @@ async def get_asset_curve_by_timeframe(
             # Calculate holdings and cash at each timestamp
             for i, ts in enumerate(timestamps):
                 ts_datetime = datetime.fromtimestamp(ts, tz=timezone.utc)
+                is_last_timestamp = (i == len(timestamps) - 1)
                 
                 # Calculate cash changes up to this timestamp
                 cash_change = 0.0
@@ -396,11 +403,11 @@ async def get_asset_curve_by_timeframe(
                         trade_time = trade_time.replace(tzinfo=timezone.utc)
                     
                     if trade_time <= ts_datetime:
-                        # Update cash
-                        trade_amount = float(trade.price) * float(trade.quantity) + float(trade.commission)
-                        if trade.side == "BUY":
+                        # Update cash (include commission and interest)
+                        trade_amount = float(trade.price) * float(trade.quantity) + float(trade.commission) + float(trade.interest_charged)
+                        if trade.side == "BUY" or trade.side == "LONG":
                             cash_change -= trade_amount
-                        else:  # SELL
+                        else:  # SELL or SHORT
                             cash_change += trade_amount
                         
                         # Update position
@@ -408,24 +415,40 @@ async def get_asset_curve_by_timeframe(
                         if key not in position_quantities:
                             position_quantities[key] = 0.0
                         
-                        if trade.side == "BUY":
+                        if trade.side == "BUY" or trade.side == "LONG":
                             position_quantities[key] += float(trade.quantity)
-                        else:  # SELL
+                        else:  # SELL or SHORT
                             position_quantities[key] -= float(trade.quantity)
                 
-                current_cash = float(account.initial_capital) + cash_change
+                # For the last timestamp, use actual current_cash
+                if is_last_timestamp:
+                    current_cash = float(account.current_cash)
+                else:
+                    current_cash = float(account.initial_capital) + cash_change
                 
                 # Calculate positions value using prices at this timestamp
                 positions_value = 0.0
-                for (symbol, market), quantity in position_quantities.items():
-                    if quantity > 0 and (symbol, market) in symbol_klines:
-                        klines = symbol_klines[(symbol, market)]
-                        if i < len(klines):
-                            price = klines[i]['close']
-                            if price:
-                                positions_value += float(price) * quantity
+                
+                # For the last timestamp, use actual Position table data
+                if is_last_timestamp:
+                    from services.asset_calculator import calc_positions_market_value
+                    positions_value = calc_positions_market_value(db, account.id)
+                else:
+                    # For historical points, reconstruct from trades
+                    for (symbol, market), quantity in position_quantities.items():
+                        if quantity > 0 and (symbol, market) in symbol_klines:
+                            klines = symbol_klines[(symbol, market)]
+                            if i < len(klines):
+                                price = klines[i]['close']
+                                if price:
+                                    positions_value += float(price) * quantity
                 
                 total_assets = current_cash + positions_value
+                
+                # Calculate profit: total_assets - initial_capital
+                initial_capital = float(account.initial_capital)
+                profit = total_assets - initial_capital
+                profit_percentage = (profit / initial_capital) * 100 if initial_capital > 0 else 0.0
                 
                 result.append({
                     "timestamp": ts,
@@ -433,6 +456,9 @@ async def get_asset_curve_by_timeframe(
                     "user_id": account.user_id,
                     "username": account.name,
                     "total_assets": total_assets,
+                    "initial_capital": initial_capital,
+                    "profit": profit,
+                    "profit_percentage": profit_percentage,
                     "cash": current_cash,
                     "positions_value": positions_value,
                 })

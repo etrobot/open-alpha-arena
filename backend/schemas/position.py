@@ -10,6 +10,7 @@ class PositionOut(BaseModel):
     quantity: int
     available_quantity: int
     avg_cost: float
+    leverage: int
 
     class Config:
         from_attributes = True
