@@ -10,10 +10,10 @@ DONE:
 - Paper Trading
 - OpenAI compatible API
 - LEVERAGE
-- cctx quotes
+- ccxt for quotation
 
 TODO:
-- real trading
+- real trading (actually you can implement it with ccxt by the help of AI coding tools easily)
 
 ## Star History
 
